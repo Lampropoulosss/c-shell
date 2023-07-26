@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <sys/wait.h>
 #include "builtin_commands.h"
@@ -160,6 +161,8 @@ char **sh_get_args(char *line)
 int sh_launch(char **args)
 {
     bool needPipes = false;
+    bool needFile = false;
+
     int *fd = malloc(sizeof(int) * 2);
     if (fd == NULL)
     {
@@ -177,10 +180,16 @@ int sh_launch(char **args)
             break;
         }
 
+        if (strcmp(args[i], ">") == 0)
+        {
+            needFile = true;
+            break;
+        }
+
         i++;
     }
 
-    if (!needPipes)
+    if (!needPipes && !needFile)
     {
         free(fd);
     }
@@ -203,22 +212,29 @@ int sh_launch(char **args)
     }
     else if (pid == 0) // Child process
     {
-        if (needPipes)
+        if (needPipes || needFile)
         {
+            int original_stdout_fd = dup(STDOUT_FILENO);
+
             dup2(fd[1], STDOUT_FILENO);
             close(fd[0]);
             close(fd[1]);
+            free(fd);
 
             args[i] = NULL; // Set args[i] to NULL to terminate the argument list at the index i
 
             if (execvp(args[0], args) == -1)
             {
                 fprintf(stderr, "sh: %s\n", strerror(errno));
+                dup2(original_stdout_fd, STDOUT_FILENO);
+                close(original_stdout_fd);
+
                 exit(EXIT_FAILURE);
             }
         }
         else
         {
+
             if (execvp(args[0], args) == -1)
             {
                 fprintf(stderr, "sh: %s\n", strerror(errno));
@@ -239,13 +255,19 @@ int sh_launch(char **args)
         }
         else if (pid2 == 0) // Child process
         {
+            int original_stdin_fd = dup(STDIN_FILENO);
+
             dup2(fd[0], STDIN_FILENO);
             close(fd[0]);
             close(fd[1]);
+            free(fd);
 
             if (execvp(args[i + 1], args + i + 1) == -1)
             {
                 fprintf(stderr, "sh: %s\n", strerror(errno));
+                dup2(original_stdin_fd, STDIN_FILENO);
+                close(original_stdin_fd);
+
                 exit(EXIT_FAILURE);
             }
         }
@@ -253,6 +275,48 @@ int sh_launch(char **args)
         waitpid(pid, NULL, WUNTRACED);
         waitpid(pid2, NULL, WUNTRACED);
         printf("\n");
+    }
+    else if (needFile)
+    {
+        close(fd[1]); // Close write end of the pipe.
+
+        int fd2 = open(args[i + 1], O_WRONLY | O_CREAT, 0666);
+
+        char buffer[BUFF_SIZE];
+        ssize_t bytes_read;
+
+        do
+        {
+            // Read from the pipe to the buffer.
+            bytes_read = read(fd[0], buffer, BUFF_SIZE);
+            if (bytes_read == -1)
+            {
+                fprintf(stderr, "sh: An error occured while reading the pipe.\n");
+                close(fd[0]);
+                close(fd2);
+
+                exit(EXIT_FAILURE);
+            }
+
+            // Write from the buffer to the file.
+            if (bytes_read > 0)
+            {
+                if (write(fd2, buffer, bytes_read) == -1)
+                {
+                    fprintf(stderr, "sh: An error occured while writing to the file.\n");
+                    close(fd[0]);
+                    close(fd2);
+
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+        } while (bytes_read > 0);
+
+        waitpid(pid, NULL, WUNTRACED);
+        close(fd2);
+        close(fd[0]);
+        free(fd);
     }
     else
     {

@@ -23,6 +23,8 @@ int sh_help()
     }
 
     printf("Use the man command for information on other programs.\n");
+    printf("The pipe operator (\"|\") and the output redirection operator (\">\") are allowed.\n");
+    printf("You may also use double quotes ('\"')\n");
     return 1;
 }
 
